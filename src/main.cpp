@@ -46,7 +46,7 @@ float u_prev = 0.0f;                       // 上一拍实际下发的 PWM
 const float ENC_SCALE = 1.0f / 4.0f;
 
 // ===== 滑动平均缓冲区 (存5个10 ms值) =====
-#define N_WIN 10
+#define N_WIN 11
 float win_buf[N_WIN] = {0};
 uint8_t win_idx = 0;
 uint8_t win_count = 0;
