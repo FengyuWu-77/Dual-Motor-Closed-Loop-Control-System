@@ -26,13 +26,13 @@ long last_total_10ms = 0;
 
 // ===== 启动前馈（open-loop boot） =====
 float U_BOOT = 20.0f;                     // 启动占空比 (0..255)
-unsigned long BOOT_MS = 300;              // 启动持续时间 (ms)
+unsigned long BOOT_MS = 200;              // 启动持续时间 (ms)
 bool in_boot = true;                      // 启动阶段标志
 unsigned long boot_until = 0;             // 启动截止时间
 
 // ===== PI controller (增量式) =====
-float KP = 0.006f;
-float KI = 0.0004f;
+float KP = 0.014f;
+float KI = 0.0009f;
 float target_cps = 300.0f;                 // counts/s 目标(保持旧单位)
 float e_prev = 0.0f;                       // 上一拍误差（增量式用）
 const float UMAX = 255.0f;                 // PWM 最大
