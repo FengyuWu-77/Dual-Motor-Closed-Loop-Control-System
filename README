@@ -16,6 +16,9 @@ int main (void)
 }
 ```
 
+![1759419865641](image/README/1759419865641.png)
+
+
 Including a header file produces the same results as copying the header file
 into each source file that needs it. Such copying would be time-consuming
 and error-prone. With a header file, the related declarations appear
