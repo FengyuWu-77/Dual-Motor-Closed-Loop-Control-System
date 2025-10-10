@@ -135,5 +135,5 @@ The controller maintained both speed loops concurrently at 10 ms sampling and 10
 #### 🎥 Demonstration Video — Dual-Motor Real-Time Control
 
 
-
+[Demonstration](Demonstration for Motor.mp4)
 
