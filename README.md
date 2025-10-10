@@ -46,6 +46,8 @@
 | **Encoders** | Quadrature feedback | Motor A → `D2, D3`; Motor B → `D4, D6` |
 | **Standby Pin** | Enable both drivers | `STBY=D7` |
 
+![1760062528293](image/README/1760062528293.png)
+
 ## 🧰 Serial CLI Interface
 
 | Command | Description | Example |
