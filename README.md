@@ -16,6 +16,8 @@
 - 🧮 **Non-blocking serial CLI** for runtime tuning
 - 📊 **Python log analyzer** for automatic overshoot / steady-state / settling-time computation
 
+[Python log analyzer](https://github.com/FengyuWu-77/Control/tree/main/tools)
+
 
 ## ⚙️ Controller Parameters
 
