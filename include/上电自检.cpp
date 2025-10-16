@@ -1,6 +1,5 @@
 #include <Arduino.h>
-#include <math.h>     // fabsf()
-#include <EEPROM.h>   // EEPROM.get/put
+#include <math.h>   // fabsf()
 
 /* ======================== Pins (Motor A) ======================== */
 const uint8_t PIN_PWMA = 5;     // PWM (OC0B -> PD5)
@@ -34,27 +33,19 @@ unsigned long lastPrint = 0;
 volatile long enc1_total = 0;   // x4 解码累计脉冲(+/-)
 volatile long enc2_total = 0;
 
-/* ======================== Defaults (for factory) ================= */
-const float    KP_DEFAULT        = 0.0018f;
-const float    KI_DEFAULT        = 0.00003f;
-const float    U_BOOT_DEFAULT    = 20.0f;
-const unsigned BOOT_MS_DEFAULT   = 200;
-const float    DU_MAX_DEFAULT    = 400.0f;
-
 /* ======================== Boot (open-loop) ====================== */
-float U_BOOT = U_BOOT_DEFAULT;               // 启动占空比 (0..255)
-unsigned long BOOT_MS = BOOT_MS_DEFAULT;     // 启动持续时间 (ms)
+float U_BOOT = 20.0f;                     // 启动占空比 (0..255)
+unsigned long BOOT_MS = 200;              // 启动持续时间 (ms)
 volatile bool in_boot1 = true, in_boot2 = true;
-// 改为相对计时的截止时间（从控制启动的0ms起算）
-volatile unsigned long boot1_until_rel = 0, boot2_until_rel = 0;
+volatile unsigned long boot1_until = 0, boot2_until = 0;
 
 /* ======================== Shared PI ============================= */
-float KP = KP_DEFAULT;
-float KI = KI_DEFAULT;
+float KP = 0.014f;
+float KI = 0.0009f;
 
 /* 目标转速（counts/s） */
-volatile float target1_cps = 200.0f;
-volatile float target2_cps = 200.0f;
+volatile float target1_cps = 600.0f;
+volatile float target2_cps = 900.0f;
 
 /* PI 状态（各自）*/
 volatile float e1_prev = 0.0f, e2_prev = 0.0f;
@@ -62,13 +53,13 @@ volatile float u1_prev = 0.0f, u2_prev = 0.0f;
 
 /* 限幅/限斜率 */
 const float UMAX = 255.0f;               // PWM 上限
-float DU_MAX_PER_SEC = DU_MAX_DEFAULT;   // 每秒最大 PWM 变化量
+float DU_MAX_PER_SEC = 800.0f;           // 每秒最大 PWM 变化量
 
 /* x4 scale：把“每个沿”换回“完整四相周期”的计数 */
 const float ENC_SCALE = 1.0f / 4.0f;
 
 /* ======================== 5点滑动平均（每路各一套） ============ */
-constexpr uint8_t SMA_N = 10;
+constexpr uint8_t SMA_N = 5;
 float sma1_buf[SMA_N] = {0}, sma2_buf[SMA_N] = {0};
 uint8_t sma1_idx = 0, sma2_idx = 0;
 uint8_t sma1_cnt = 0, sma2_cnt = 0;
@@ -83,7 +74,7 @@ volatile long last1_total = 0, last2_total = 0;
 
 /* ======================== Sample 快照 =========================== */
 struct Sample {
-  uint32_t t;    // 时间戳(ms) —— 使用“控制相对时间”
+  uint32_t t;    // 时间戳(ms)
   float meas;    // 平滑速度(cps)
   float target;  // 斜坡后目标(cps)
   float u;       // 控制输出(PWM)
@@ -91,13 +82,9 @@ struct Sample {
 volatile Sample lastSampleA;
 volatile Sample lastSampleB;
 
-/* ===== 控制相对时间（从控制启动那一刻计时） ===== */
-volatile uint32_t t0_ctl = 0;  // 控制时间零点（ms）
-inline uint32_t ctl_millis() { return millis() - t0_ctl; }
-
 /* ======================== Soft Stop 参数/状态 =================== */
 float SOFTSTOP_ERR_CPS        = 150.0f;   // 误差阈值（cps）
-unsigned int SOFTSTOP_TIME_MS = 1500;     // 连续触发时间（ms）
+unsigned int SOFTSTOP_TIME_MS = 800;      // 连续触发时间（ms）
 float SOFTSTOP_RAMP_CPS_S     = 1200.0f;  // 软停斜坡（cps/s）→ 0
 float SAT_MARGIN              = 5.0f;     // 认为“接近饱和”的裕度（PWM）
 inline unsigned int ss_needed_ticks() { return (SOFTSTOP_TIME_MS + 9) / 10; }
@@ -106,7 +93,7 @@ volatile bool softstop1 = false, softstop2 = false;
 
 /* ============ 软停报警（一次性事件，ISR 只挂起，loop 打印） ==== */
 struct SoftStopAlarm {
-  uint32_t t;    // 使用“控制相对时间”
+  uint32_t t;
   uint8_t  motor;   // 1 or 2
   float    target;
   float    meas;
@@ -191,11 +178,13 @@ float ramp_update(float target_in, float last_cmd, float rate_cps_per_s) {
 }
 
 /* ======================== 控制器一步（增量式 PI） ================ */
-// 采用真正的“增量式 PI”：du = Kp*(e) + Ki*e*dt（e_prev 在此实现中不需要）
+// 采用真正的“增量式 PI”：du = Kp*(e - e_prev) + Ki*e*dt
 float controller_step(float meas_cps, float target_cmd,
                       volatile float* e_prev, volatile float* u_prev) {
   float e  = target_cmd - meas_cps;
-  float du = KP * e + KI * e * DT_CTRL_S;      // 增量式 PI
+  float de = e - *e_prev;
+  float du = KP * de + KI * e * DT_CTRL_S;
+
   float u_cmd = *u_prev + du;
 
   // 幅值饱和
@@ -207,7 +196,7 @@ float controller_step(float meas_cps, float target_cmd,
   if (u_cmd > *u_prev + du_max) u_cmd = *u_prev + du_max;
   if (u_cmd < *u_prev - du_max) u_cmd = *u_prev - du_max;
 
-  *e_prev = e;
+  *e_prev = e;        // 更新 e_prev
   *u_prev = u_cmd;
   return u_cmd;
 }
@@ -221,72 +210,6 @@ bool check_stby_high_once() {
   pinMode(PIN_STBY, OUTPUT);
   digitalWrite(PIN_STBY, HIGH);
   return (level == HIGH);
-}
-
-/* ======================== EEPROM 参数持久化 ===================== */
-struct Params {
-  float    kp;
-  float    ki;
-  float    u_boot;
-  uint16_t boot_ms;
-  float    du_max;
-  uint16_t crc;     // 放最后
-};
-
-Params p;                         // RAM 镜像
-bool params_from_eeprom = false;  // 本次运行是否来自 EEPROM
-
-static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
-  uint16_t crc = 0xFFFF;     // init
-  const uint16_t poly = 0x1021;
-  for (size_t i = 0; i < len; ++i) {
-    crc ^= (uint16_t)data[i] << 8;
-    for (uint8_t b = 0; b < 8; ++b) {
-      if (crc & 0x8000) crc = (crc << 1) ^ poly;
-      else              crc = (crc << 1);
-    }
-  }
-  return crc;
-}
-
-// 把“当前运行值”抓到 p
-static void params_capture_from_runtime() {
-  p.kp      = KP;
-  p.ki      = KI;
-  p.u_boot  = U_BOOT;
-  p.boot_ms = (uint16_t)BOOT_MS;
-  p.du_max  = DU_MAX_PER_SEC;
-}
-
-// 把 p 应用到“当前运行值”
-static void params_apply_to_runtime() {
-  KP              = p.kp;
-  KI              = p.ki;
-  U_BOOT          = p.u_boot;
-  BOOT_MS         = p.boot_ms;
-  DU_MAX_PER_SEC  = p.du_max;
-}
-
-bool params_load() {
-  EEPROM.get(0, p);
-  uint16_t c = p.crc;
-  p.crc = 0;
-  bool ok = (crc16_ccitt(reinterpret_cast<const uint8_t*>(&p), sizeof(p)) == c);
-  if (ok) {
-    params_apply_to_runtime();
-    params_from_eeprom = true;
-  } else {
-    params_from_eeprom = false;
-  }
-  return ok;
-}
-
-void params_save() {
-  params_capture_from_runtime();
-  p.crc = 0;
-  uint16_t c = crc16_ccitt(reinterpret_cast<const uint8_t*>(&p), sizeof(p));
-  p.crc = c;
-  EEPROM.put(0, p);
 }
 
 /* ======================== CLI ============================= */
@@ -310,32 +233,27 @@ void process_line(const char* line) {
     String num = cmd.substring(low.indexOf("set kp")+6); num.trim();
     KP = num.toFloat();
     e1_prev = e2_prev = 0.0f;
-    params_from_eeprom = false;                // RAM 已与 EEPROM 脱钩
     Serial.print(F("OK KP=")); Serial.println(KP,6);
   }
   else if (low.startsWith("set ki")) {
     String num = cmd.substring(low.indexOf("set ki")+6); num.trim();
     KI = num.toFloat();
     e1_prev = e2_prev = 0.0f;
-    params_from_eeprom = false;
     Serial.print(F("OK KI=")); Serial.println(KI,6);
   }
   else if (low.startsWith("set bootu")) {
     String num = cmd.substring(low.indexOf("set bootu")+9); num.trim();
     U_BOOT = num.toFloat();
-    params_from_eeprom = false;
     Serial.print(F("OK U_BOOT=")); Serial.println(U_BOOT,1);
   }
   else if (low.startsWith("set boott")) {
     String num = cmd.substring(low.indexOf("set boott")+9); num.trim();
     BOOT_MS = (unsigned long) num.toInt();
-    params_from_eeprom = false;
     Serial.print(F("OK BOOT_MS=")); Serial.println(BOOT_MS);
   }
   else if (low.startsWith("set dumax")) {
     String num = cmd.substring(low.indexOf("set dumax")+9); num.trim();
     DU_MAX_PER_SEC = num.toFloat();
-    params_from_eeprom = false;
     Serial.print(F("OK DU_MAX/s=")); Serial.println(DU_MAX_PER_SEC,1);
   }
   // SoftStop 参数与清除
@@ -375,47 +293,24 @@ void process_line(const char* line) {
     if (ok) Serial.println(F("STBY,OK"));
     else    Serial.println(F("STBY,LOW"));
   }
-  // EEPROM：保存/加载/恢复默认
-  else if (low == "save") {
-    params_save();
-    Serial.println(F("OK Saved"));
-  }
-  else if (low == "load") {
-    if (params_load()) Serial.println(F("OK Loaded"));
-    else               Serial.println(F("ERR LoadFail (CRC)"));
-  }
-  else if (low == "factory") {
-    // 恢复编译时默认到 RAM 并保存到 EEPROM
-    KP = KP_DEFAULT; KI = KI_DEFAULT;
-    U_BOOT = U_BOOT_DEFAULT; BOOT_MS = BOOT_MS_DEFAULT;
-    DU_MAX_PER_SEC = DU_MAX_DEFAULT;
-    params_from_eeprom = false;     // 现在是 RAM 默认
-    params_save();                  // 写入 EEPROM
-    Serial.println(F("OK FactorySaved"));
-  }
   else if (low.startsWith("status")) {
     noInterrupts();
     float c1 = cps1_meas, c2 = cps2_meas;
     float t1 = tgt1_cmd,  t2 = tgt2_cmd;
     bool b1  = in_boot1,  b2 = in_boot2;
     interrupts();
-
-    Serial.print(F("STAT,t=")); Serial.print(millis());  // 仍用绝对时间，便于排障
+    Serial.print(F("STAT,t=")); Serial.print(millis());
     Serial.print(F(",boot1="));  Serial.print(b1 ? 1 : 0);
     Serial.print(F(",boot2="));  Serial.print(b2 ? 1 : 0);
-
     Serial.print(F(",kp="));     Serial.print(KP,6);
-    if (params_from_eeprom) Serial.print('E');     // EEPROM 来源标记
     Serial.print(F(",ki="));     Serial.print(KI,6);
-    if (params_from_eeprom) Serial.print('E');
-
     Serial.print(F(",t1="));     Serial.print(t1,2);
     Serial.print(F(",c1="));     Serial.print(c1,2);
     Serial.print(F(",t2="));     Serial.print(t2,2);
     Serial.print(F(",c2="));     Serial.println(c2,2);
   }
   else if (low.length()) {
-    Serial.println(F("Unknown. Use: 'set t1 <v>', 'set t2 <v>', 'set kp <v>', 'set ki <v>', 'set bootu <v>', 'set boott <ms>', 'set dumax <v>', 'set ss_err <cps>', 'set ss_time <ms>', 'set ss_ramp <cps/s>', 'set sat_margin <pwm>', 'enc clear', 'stby check', 'save', 'load', 'factory', 'status'"));
+    Serial.println(F("Unknown. Use: 'set t1 <v>', 'set t2 <v>', 'set kp <v>', 'set ki <v>', 'set bootu <v>', 'set boott <ms>', 'set dumax <v>', 'set ss_err <cps>', 'set ss_time <ms>', 'set ss_ramp <cps/s>', 'set sat_margin <pwm>', 'enc clear', 'stby check', 'status'"));
   }
 }
 
@@ -523,13 +418,6 @@ void setup() {
     return; // 不启动 Timer2，loop 仍运行（仅串口）
   }
 
-  // —— EEPROM：优先尝试加载参数（若成功，覆盖 KP/KI/U_BOOT/BOOT_MS/DU_MAX）
-  if (params_load()) {
-    Serial.println(F("EEPROM,OK"));
-  } else {
-    Serial.println(F("EEPROM,EMPTY/BAD"));
-  }
-
   // Encoder pins
   pinMode(PIN_ENC1_A, INPUT_PULLUP);
   pinMode(PIN_ENC1_B, INPUT_PULLUP);
@@ -566,8 +454,11 @@ void setup() {
     Serial.println(F("POST,OK"));
   }
 
-  // —— 启动前馈（此时还未启动控制时钟）——
+  // —— 启动前馈
+  unsigned long t = millis();
   in_boot1 = in_boot2 = true;
+  boot1_until = t + BOOT_MS;
+  boot2_until = t + BOOT_MS;
   u1_prev = U_BOOT; motorA_set(U_BOOT);
   u2_prev = U_BOOT; motorB_set(U_BOOT);
 
@@ -584,19 +475,14 @@ void setup() {
   tgt1_cmd = target1_cps;
   tgt2_cmd = target2_cps;
 
-  // ====== 设定“控制时间零点”并改用相对截止时间 ======
-  t0_ctl = millis();           // 控制时钟从此刻起算 0ms
-  boot1_until_rel = BOOT_MS;   // 相对时钟下的开环截止
-  boot2_until_rel = BOOT_MS;
-
   // 启动 Timer2：10ms 控制节拍
   setup_timer2_10ms();
 
-  Serial.println(F("Dual-motor PI (10ms ISR + 10pt SMA + SoftStop & EncoderFreeze; STBY/POST OK; EEPROM params; 10Hz print; lastSampleA/B)."));
+  Serial.println(F("Dual-motor PI (10ms ISR + 5pt SMA + SoftStop & EncoderFreeze; STBY/POST OK; 10Hz print; lastSampleA/B)."));
 }
 
 /* ======================== 10 ms 控制 ISR ======================== */
-ISR(TIMER2_COMPA_vect, ISR_NOBLOCK) {
+ISR(TIMER2_COMPA_vect) {
   // 1) 瞬时速度（脉冲增量）
   long t1 = enc1_total;
   long t2 = enc2_total;
@@ -607,7 +493,7 @@ ISR(TIMER2_COMPA_vect, ISR_NOBLOCK) {
   // —— 每 200ms 检查一次编码器是否没变
   encChkTicks++;
   if (encChkTicks >= ENC_FREEZE_TICKS) {
-    uint32_t t_ms_now = ctl_millis();   // 使用控制相对时间
+    uint32_t t_ms_now = millis();
 
     if (enc1_total == enc1_total_chk) {
       alarm_enc1.t      = t_ms_now;
@@ -649,8 +535,8 @@ ISR(TIMER2_COMPA_vect, ISR_NOBLOCK) {
   if (sma2_cnt < SMA_N) sma2_cnt++;
   cps2_meas = sma2_sum / (float)sma2_cnt;
 
-  // 3) 统一缓存一次“控制相对时间”时间戳
-  uint32_t t_ms = ctl_millis();
+  // 3) 统一缓存一次时间戳
+  uint32_t t_ms = millis();
 
   // 4) 目标斜坡（正常跟随目标）
   constexpr float RAMP_CPS_PER_S = 800.0f;
@@ -704,9 +590,9 @@ ISR(TIMER2_COMPA_vect, ISR_NOBLOCK) {
   if (softstop1) tgt1_cmd = ramp_update(0.0f, tgt1_cmd, SOFTSTOP_RAMP_CPS_S);
   if (softstop2) tgt2_cmd = ramp_update(0.0f, tgt2_cmd, SOFTSTOP_RAMP_CPS_S);
 
-  // 7) 启动期 or 闭环控制（相对时间判断）
+  // 7) 启动期 or 闭环控制
   // A
-  if (in_boot1 && (long)(t_ms - boot1_until_rel) < 0) {
+  if (in_boot1 && (long)(t_ms - boot1_until) < 0) {
     motorA_set(U_BOOT); u1_prev = U_BOOT;
   } else {
     if (in_boot1) { in_boot1 = false; e1_prev = tgt1_cmd - cps1_meas; u1_prev = U_BOOT; }
@@ -714,7 +600,7 @@ ISR(TIMER2_COMPA_vect, ISR_NOBLOCK) {
     motorA_set(u1);
   }
   // B
-  if (in_boot2 && (long)(t_ms - boot2_until_rel) < 0) {
+  if (in_boot2 && (long)(t_ms - boot2_until) < 0) {
     motorB_set(U_BOOT); u2_prev = U_BOOT;
   } else {
     if (in_boot2) { in_boot2 = false; e2_prev = tgt2_cmd - cps2_meas; u2_prev = U_BOOT; }
@@ -755,7 +641,7 @@ void loop() {
     sB.u      = lastSampleB.u;
     interrupts();
 
-    // CSV：CTL,t_ms,t1,c1,u1,t2,c2,u2,kp,ki （t_ms 为控制相对时间）
+    // CSV：CTL,t_ms,t1,c1,u1,t2,c2,u2,kp,ki
     Serial.print(F("CTL,"));
     Serial.print(sA.t);         Serial.print(',');
     Serial.print(sA.target,1);  Serial.print(',');
@@ -765,7 +651,7 @@ void loop() {
     Serial.print(sB.meas,1);    Serial.print(',');
     Serial.print(sB.u,0);       Serial.print(',');
     Serial.print(KP,4);         Serial.print(',');
-    Serial.println(KI,5);
+    Serial.println(KI,4);
   }
 
   // —— SoftStop 报警（一次性）
@@ -798,8 +684,8 @@ void loop() {
     SoftStopAlarm e1, e2; bool q1, q2;
     noInterrupts();
     q1 = alarm_enc1_pending; q2 = alarm_enc2_pending;
-    if (q1) { e1.t=e1.t; e1.motor=alarm_enc1.motor; e1.target=alarm_enc1.target; e1.meas=alarm_enc1.meas; e1.u=alarm_enc1.u; alarm_enc1_pending=false; }
-    if (q2) { e2.t=e2.t; e2.motor=alarm_enc2.motor; e2.target=alarm_enc2.target; e2.meas=alarm_enc2.meas; e2.u=alarm_enc2.u; alarm_enc2_pending=false; }
+    if (q1) { e1.t=alarm_enc1.t; e1.motor=alarm_enc1.motor; e1.target=alarm_enc1.target; e1.meas=alarm_enc1.meas; e1.u=alarm_enc1.u; alarm_enc1_pending=false; }
+    if (q2) { e2.t=alarm_enc2.t; e2.motor=alarm_enc2.motor; e2.target=alarm_enc2.target; e2.meas=alarm_enc2.meas; e2.u=alarm_enc2.u; alarm_enc2_pending=false; }
     interrupts();
 
     if (q1) {
