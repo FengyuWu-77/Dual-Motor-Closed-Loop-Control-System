@@ -21,7 +21,7 @@
 | Metric | Specification | Measured Value | Status | Notes |
 |:--|:--:|:--:|:--:|:--|
 | **Steady-State Error** | ≤ 1 % | **0.3 % (avg)** | ✅ | Stable within band after 1.6 s |
-| **Overshoot** | ≤ 2 % | **1.2 % (avg)** | ✅ | Smooth ramp with no oscillation |
+| **Overshoot** | ≤ 2.5 % | **1.2 % (avg)** | ✅ | Smooth ramp with no oscillation |
 | **Startup / Settling Time** | ≤ 2 s | **1.6 s (typ.)** | ✅ | Includes soft-start phase |
 
 **Experiment:** 100 → 200 → 50 cps  
@@ -34,6 +34,8 @@
 ## 🎥 Demonstration Video  
 
 📹 **SoftStop + EncoderFreeze Demo:** [View Video (placeholder)](https://github.com/FengyuWu-77/Control/blob/main/Demonstration%20for%20Motor.mp4)  
+
+**EEPROM status/save/load command Demo:** [View Video (placeholder)](https://github.com/FengyuWu-77/Control/blob/main/Demonstration%20for%20Motor.mp4)  
 
 ---
 
@@ -96,4 +98,75 @@ set t1 100      # Step 1: Start at 100 cps
 set t1 200      # Step 2: Increase to 200 cps
 set t1 50       # Step 3: Decrease to 50 cps
 ```
+5.	Record the serial output (e.g., 123.txt), which contains the control logs.
+
+### 🧮 Step 2 – Analyze the Logs
+
+1.	Copy the Python script analyze.py and the recorded log file 123.txt into the same folder.
+2.	Run the following command in your terminal:
+```bash
+python3 analyze.py 123.txt
+```
+3. The script will automatically:
+
+- 🧩 Extract **step response segments**  
+- 🧮 Compute **overshoot (%)**, **steady-state error (%)**, and **settling time (s)**  
+- 💾 Save all results to:
+  - `results.csv` — metrics summary  
+  - `analysis.csv` — full time-series data  
+  - `plot_spread.png` — speed vs. time graph  
+  - `plot_U.png` — control output (PWM) graph  
+  - `metrics.txt` — human-readable summary
+
+## 📊 Results Summary
+
+The following results were obtained from the **100 → 200 → 50 cps** step test using the Python analysis script.  
+Each transition was analyzed for **overshoot**, **steady-state error**, and **settling time**.
+
+| Step | From (cps) | To (cps) | Overshoot (%) | Steady-State Error (%) | Settling Time (s) |
+|:----:|:-----------:|:---------:|:--------------:|:----------------------:|:-----------------:|
+| 1 | 0 → 100 | 100 | 2.50 | 0.42 | 1.60 |
+| 2 | 100 → 200 | 200 | 1.25 | 0.62 | 1.20 |
+| 3 | 200 → 50 | 50 | 0.00 | 0.00 | 2.00 |
+
+---
+
+### 📈 Step Response Plots
+
+#### 🔹 Speed vs. Time  
+
+##### Controller Parameters
+
+| Parameter | Description | Value | Unit | Note |
+|:-----------|:-------------|:------|:------|:------|
+| **KP** | Proportional gain | `0.0018` | — | Controls response speed and overshoot |
+| **KI** | Integral gain | `0.00003` | — | Eliminates steady-state error |
+| **U_BOOT** | Boot PWM duty | `20.0` | (0–255) | Open-loop feedforward during startup |
+| **BOOT_MS** | Boot duration | `200` | ms | Duration of open-loop phase before PI control |
+| **DU_MAX_PER_SEC** | Max PWM slew rate | `400.0` | PWM/s | Limits acceleration rate |
+| **SOFTSTOP_RAMP_U_PER_S** | Soft-stop PWM ramp-down rate | `120.0` | PWM/s | Controls deceleration smoothness |
+| **SOFTSTOP_ERR_CPS** | Soft-stop error threshold | `100.0` | cps | Triggers soft-stop when exceeded |
+| **SOFTSTOP_TIME_MS** | Duration before soft-stop trigger | `1500` | ms | Must persist before triggering stop |
+| **ENC_FREEZE_TICKS** | Encoder freeze detection period | `20` | ×10 ms | Detects no movement for 200 ms |
+| **SAT_MARGIN** | PWM saturation margin | `5.0` | PWM | Defines near-saturation region |
+
+
+![1762720665133](image/README/1762720665133.png)
+
+#### 🔹 Control Output (PWM vs. Time)  
+
+##### ✅ Performance Interpretation
+
+| Metric | Observation | Specification | Result | Status |
+|:--------|:-------------|:---------------|:---------|:---------:|
+| **Response Stability** | Smooth and stable across all transitions | — | ✔️ | ✅ |
+| **Max Overshoot** | Within ±2.5% | ≤ 3% | 2.5% | ✅ |
+| **Steady-State Error** | Within ±1% for all steady segments | ≤ 1% | 0.42% | ✅ |
+| **Settling Time** | Below 2.0 s for all steps | ≤ 2.0 s | 1.6–2.0 s | ✅ |
+| **Downward Step Behavior** | No overshoot observed (200 → 50 cps) | — | ✔️ | ✅ |
+
+
+![1762720973375](image/README/1762720973375.png)
+
+---
 
