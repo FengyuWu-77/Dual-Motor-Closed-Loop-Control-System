@@ -1,4 +1,4 @@
-# ⚙️ Dual-Motor Closed-Loop Control System with SoftStop & EncoderFreeze  
+# ⚙️ Dual-Motor Closed-Loop Control System
 **Author:** Fengyu Wu(Eric Wu)
 **Platform:** ATmega328PB + TB6612FNG + Quadrature Encoder  
 **Languages:** C++ (Arduino Core) + Python  
