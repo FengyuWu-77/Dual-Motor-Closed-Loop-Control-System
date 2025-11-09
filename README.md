@@ -1,4 +1,4 @@
-# ⚙️ Dual-Motor Closed-Loop Control System
+# ⚙️ Dual-Motor Closed-Loop Control System (MCU+RTOS)
 **Author:** Fengyu Wu(Eric Wu)
 **Platform:** ATmega328PB + TB6612FNG + Quadrature Encoder  
 **Languages:** C++ (Arduino Core) + Python  
