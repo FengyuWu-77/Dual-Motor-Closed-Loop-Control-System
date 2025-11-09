@@ -33,9 +33,9 @@
 
 ## 🎥 Demonstration Video  
 
-📹 **SoftStop + EncoderFreeze Demo:** [View Video (placeholder)](https://github.com/FengyuWu-77/Control/blob/main/Demonstration%20for%20Motor.mp4)  
+📹 **SoftStop + EncoderFreeze Demo:** [SoftStop + EncoderFreeze Demo](https://drive.google.com/file/d/1HktswlFvmHPhK8YpwzYr5fItRhBmj6Bx/view?usp=sharing)  
 
-**EEPROM status/save/load command Demo:** [View Video (placeholder)](https://github.com/FengyuWu-77/Control/blob/main/Demonstration%20for%20Motor.mp4)  
+**EEPROM status/save/load command Demo:** [EEPROM status/save/load command Demo](https://drive.google.com/file/d/1jQBjnsprSxRK2ReLWNNlK4N_Dhv1GYOY/view?usp=sharing)  
 
 ---
 
