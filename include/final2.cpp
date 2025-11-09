@@ -100,7 +100,6 @@ inline uint32_t ctl_millis() { return millis() - t0_ctl; }
 float SOFTSTOP_ERR_CPS        = 100.0f;   // 误差阈值（cps）
 unsigned int SOFTSTOP_TIME_MS = 1500;     // 连续触发时间（ms）
 float SOFTSTOP_RAMP_CPS_S     = 1200.0f;  // 软停斜坡（cps/s）→ 0
-float SOFTSTOP_RAMP_U_PER_S   = 120.0f;   // 新增：软停时 PWM 斜坡速率 (PWM/s)，可调
 float SAT_MARGIN              = 5.0f;     // 认为“接近饱和”的裕度（PWM）
 inline unsigned int ss_needed_ticks() { return (SOFTSTOP_TIME_MS + 9) / 10; }
 volatile uint16_t satTicks1 = 0, satTicks2 = 0;
@@ -122,7 +121,6 @@ volatile SoftStopAlarm alarm_ss1, alarm_ss2;
 
 /* ====== 编码器冻结（200ms 周期性检查） ======================== */
 constexpr uint16_t ENC_FREEZE_TICKS = 20;   // 20*10ms = 200ms
-const long ENC_FREEZE_MIN_DELTA = 4;
 volatile uint16_t encChkTicks = 0;
 volatile long enc1_total_chk = 0;
 volatile long enc2_total_chk = 0;
@@ -724,49 +722,23 @@ ISR(TIMER2_COMPA_vect, ISR_NOBLOCK) {
   if (softstop1) tgt1_cmd = ramp_update(0.0f, tgt1_cmd, SOFTSTOP_RAMP_CPS_S);
   if (softstop2) tgt2_cmd = ramp_update(0.0f, tgt2_cmd, SOFTSTOP_RAMP_CPS_S);
 
-// ---- Motor A ----
-if (softstop1) {
-  float du_max = SOFTSTOP_RAMP_U_PER_S * DT_CTRL_S;  // 改这里
-  if (u1_prev > du_max)       u1_prev -= du_max;
-  else if (u1_prev < -du_max) u1_prev += du_max;
-  else                        u1_prev = 0.0f;
-  motorA_set(u1_prev);
-}
-else if (in_boot1 && (long)(t_ms - boot1_until_rel) < 0) {
-  motorA_set(U_BOOT);
-  u1_prev = U_BOOT;
-}
-else {
-  if (in_boot1) {
-    in_boot1 = false;
-    e1_prev = tgt1_cmd - cps1_meas;
-    u1_prev = U_BOOT;
+  // 7) 启动期 or 闭环控制（相对时间判断）
+  // A
+  if (in_boot1 && (long)(t_ms - boot1_until_rel) < 0) {
+    motorA_set(U_BOOT); u1_prev = U_BOOT;
+  } else {
+    if (in_boot1) { in_boot1 = false; e1_prev = tgt1_cmd - cps1_meas; u1_prev = U_BOOT; }
+    float u1 = controller_step(cps1_meas, tgt1_cmd, &e1_prev, &u1_prev);
+    motorA_set(u1);
   }
-  float u1 = controller_step(cps1_meas, tgt1_cmd, &e1_prev, &u1_prev);
-  motorA_set(u1);
-}
-
-// ---- Motor B ----
-if (softstop2) {
-  float du_max = SOFTSTOP_RAMP_U_PER_S * DT_CTRL_S;  // 改这里
-  if (u2_prev > du_max)       u2_prev -= du_max;
-  else if (u2_prev < -du_max) u2_prev += du_max;
-  else                        u2_prev = 0.0f;
-  motorB_set(u2_prev);
-}
-else if (in_boot2 && (long)(t_ms - boot2_until_rel) < 0) {
-  motorB_set(U_BOOT);
-  u2_prev = U_BOOT;
-}
-else {
-  if (in_boot2) {
-    in_boot2 = false;
-    e2_prev = tgt2_cmd - cps2_meas;
-    u2_prev = U_BOOT;
+  // B
+  if (in_boot2 && (long)(t_ms - boot2_until_rel) < 0) {
+    motorB_set(U_BOOT); u2_prev = U_BOOT;
+  } else {
+    if (in_boot2) { in_boot2 = false; e2_prev = tgt2_cmd - cps2_meas; u2_prev = U_BOOT; }
+    float u2 = controller_step(cps2_meas, tgt2_cmd, &e2_prev, &u2_prev);
+    motorB_set(u2);
   }
-  float u2 = controller_step(cps2_meas, tgt2_cmd, &e2_prev, &u2_prev);
-  motorB_set(u2);
-}
 
   // 8) 快照（逐字段写入 volatile）
   lastSampleA.t      = t_ms;
@@ -855,7 +827,6 @@ void loop() {
       Serial.print(F(", target=")); Serial.print(e1.target,1);
       Serial.print(F(", meas="));   Serial.print(e1.meas,1);
       Serial.print(F(", u="));      Serial.println(e1.u,0);
-      softstop1 = true;
     }
     if (q2) {
       Serial.print(F("ALARM,code=ENC_FREEZE, motor=2, t="));
@@ -863,9 +834,7 @@ void loop() {
       Serial.print(F(", target=")); Serial.print(e2.target,1);
       Serial.print(F(", meas="));   Serial.print(e2.meas,1);
       Serial.print(F(", u="));      Serial.println(e2.u,0);
-      softstop2 = true;
     }
     comm_quiet = true;
-  
   }
 }

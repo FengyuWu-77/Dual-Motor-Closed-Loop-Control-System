@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <math.h>     // fabsf()
 #include <EEPROM.h>   // EEPROM.get/put
-#include <avr/wdt.h>
 
 /* ======================== Pins (Motor A) ======================== */
 const uint8_t PIN_PWMA = 5;     // PWM (OC0B -> PD5)
@@ -54,8 +53,8 @@ float KP = KP_DEFAULT;
 float KI = KI_DEFAULT;
 
 /* 目标转速（counts/s） */
-volatile float target1_cps = 100.0f;
-volatile float target2_cps = 100.0;
+volatile float target1_cps = 200.0f;
+volatile float target2_cps = 200.0f;
 
 /* PI 状态（各自）*/
 volatile float e1_prev = 0.0f, e2_prev = 0.0f;
@@ -97,10 +96,9 @@ volatile uint32_t t0_ctl = 0;  // 控制时间零点（ms）
 inline uint32_t ctl_millis() { return millis() - t0_ctl; }
 
 /* ======================== Soft Stop 参数/状态 =================== */
-float SOFTSTOP_ERR_CPS        = 100.0f;   // 误差阈值（cps）
+float SOFTSTOP_ERR_CPS        = 150.0f;   // 误差阈值（cps）
 unsigned int SOFTSTOP_TIME_MS = 1500;     // 连续触发时间（ms）
 float SOFTSTOP_RAMP_CPS_S     = 1200.0f;  // 软停斜坡（cps/s）→ 0
-float SOFTSTOP_RAMP_U_PER_S   = 120.0f;   // 新增：软停时 PWM 斜坡速率 (PWM/s)，可调
 float SAT_MARGIN              = 5.0f;     // 认为“接近饱和”的裕度（PWM）
 inline unsigned int ss_needed_ticks() { return (SOFTSTOP_TIME_MS + 9) / 10; }
 volatile uint16_t satTicks1 = 0, satTicks2 = 0;
@@ -122,7 +120,6 @@ volatile SoftStopAlarm alarm_ss1, alarm_ss2;
 
 /* ====== 编码器冻结（200ms 周期性检查） ======================== */
 constexpr uint16_t ENC_FREEZE_TICKS = 20;   // 20*10ms = 200ms
-const long ENC_FREEZE_MIN_DELTA = 4;
 volatile uint16_t encChkTicks = 0;
 volatile long enc1_total_chk = 0;
 volatile long enc2_total_chk = 0;
@@ -398,12 +395,6 @@ void process_line(const char* line) {
     params_save();                  // 写入 EEPROM
     Serial.println(F("OK FactorySaved"));
   }
-  else if (low == "reset") {
-    Serial.println(F("OK Resetting..."));
-    Serial.flush();          // 把串口缓存发出去
-    wdt_enable(WDTO_15MS);   // 开 15ms 看门狗
-    while (1) { }            // 等待 WDT 触发复位
-  }
   else if (low.startsWith("status")) {
     noInterrupts();
     float c1 = cps1_meas, c2 = cps2_meas;
@@ -513,8 +504,6 @@ bool post_jog_and_check_B() {
 
 /* ======================== Setup ============================ */
 void setup() {
-  MCUSR = 0;        // 清除复位标志，防止误判
-  wdt_disable();    // 一进来就关看门狗，避免循环复位
   Serial.begin(57600);
   Serial.setTimeout(5);
 
@@ -617,33 +606,26 @@ ISR(TIMER2_COMPA_vect, ISR_NOBLOCK) {
   long d1 = t1 - last1_total; last1_total = t1;
   long d2 = t2 - last2_total; last2_total = t2;
 
-  // —— 每 200ms 检查一次编码器是否没变（冻结 => 触发对应电机软停）
+  // —— 每 200ms 检查一次编码器是否没变
   encChkTicks++;
   if (encChkTicks >= ENC_FREEZE_TICKS) {
     uint32_t t_ms_now = ctl_millis();   // 使用控制相对时间
 
-    // Motor 1
-    if (!softstop1 && (enc1_total == enc1_total_chk)) {
+    if (enc1_total == enc1_total_chk) {
       alarm_enc1.t      = t_ms_now;
       alarm_enc1.motor  = 1;
       alarm_enc1.target = tgt1_cmd;
       alarm_enc1.meas   = cps1_meas;
       alarm_enc1.u      = u1_prev;
       alarm_enc1_pending = true;
-
-      softstop1 = true;   // ★ 冻结也走软停斜坡
     }
-
-    // Motor 2
-    if (!softstop2 && (enc2_total == enc2_total_chk)) {
+    if (enc2_total == enc2_total_chk) {
       alarm_enc2.t      = t_ms_now;
       alarm_enc2.motor  = 2;
       alarm_enc2.target = tgt2_cmd;
       alarm_enc2.meas   = cps2_meas;
       alarm_enc2.u      = u2_prev;
       alarm_enc2_pending = true;
-
-      softstop2 = true;   // ★ 同理
     }
 
     encChkTicks = 0;
@@ -724,49 +706,23 @@ ISR(TIMER2_COMPA_vect, ISR_NOBLOCK) {
   if (softstop1) tgt1_cmd = ramp_update(0.0f, tgt1_cmd, SOFTSTOP_RAMP_CPS_S);
   if (softstop2) tgt2_cmd = ramp_update(0.0f, tgt2_cmd, SOFTSTOP_RAMP_CPS_S);
 
-// ---- Motor A ----
-if (softstop1) {
-  float du_max = SOFTSTOP_RAMP_U_PER_S * DT_CTRL_S;  // 改这里
-  if (u1_prev > du_max)       u1_prev -= du_max;
-  else if (u1_prev < -du_max) u1_prev += du_max;
-  else                        u1_prev = 0.0f;
-  motorA_set(u1_prev);
-}
-else if (in_boot1 && (long)(t_ms - boot1_until_rel) < 0) {
-  motorA_set(U_BOOT);
-  u1_prev = U_BOOT;
-}
-else {
-  if (in_boot1) {
-    in_boot1 = false;
-    e1_prev = tgt1_cmd - cps1_meas;
-    u1_prev = U_BOOT;
+  // 7) 启动期 or 闭环控制（相对时间判断）
+  // A
+  if (in_boot1 && (long)(t_ms - boot1_until_rel) < 0) {
+    motorA_set(U_BOOT); u1_prev = U_BOOT;
+  } else {
+    if (in_boot1) { in_boot1 = false; e1_prev = tgt1_cmd - cps1_meas; u1_prev = U_BOOT; }
+    float u1 = controller_step(cps1_meas, tgt1_cmd, &e1_prev, &u1_prev);
+    motorA_set(u1);
   }
-  float u1 = controller_step(cps1_meas, tgt1_cmd, &e1_prev, &u1_prev);
-  motorA_set(u1);
-}
-
-// ---- Motor B ----
-if (softstop2) {
-  float du_max = SOFTSTOP_RAMP_U_PER_S * DT_CTRL_S;  // 改这里
-  if (u2_prev > du_max)       u2_prev -= du_max;
-  else if (u2_prev < -du_max) u2_prev += du_max;
-  else                        u2_prev = 0.0f;
-  motorB_set(u2_prev);
-}
-else if (in_boot2 && (long)(t_ms - boot2_until_rel) < 0) {
-  motorB_set(U_BOOT);
-  u2_prev = U_BOOT;
-}
-else {
-  if (in_boot2) {
-    in_boot2 = false;
-    e2_prev = tgt2_cmd - cps2_meas;
-    u2_prev = U_BOOT;
+  // B
+  if (in_boot2 && (long)(t_ms - boot2_until_rel) < 0) {
+    motorB_set(U_BOOT); u2_prev = U_BOOT;
+  } else {
+    if (in_boot2) { in_boot2 = false; e2_prev = tgt2_cmd - cps2_meas; u2_prev = U_BOOT; }
+    float u2 = controller_step(cps2_meas, tgt2_cmd, &e2_prev, &u2_prev);
+    motorB_set(u2);
   }
-  float u2 = controller_step(cps2_meas, tgt2_cmd, &e2_prev, &u2_prev);
-  motorB_set(u2);
-}
 
   // 8) 快照（逐字段写入 volatile）
   lastSampleA.t      = t_ms;
@@ -841,7 +797,7 @@ void loop() {
   }
 
   // —— Encoder Freeze 报警（一次性）
-  if (!comm_quiet && (alarm_enc1_pending || alarm_enc2_pending) ){
+  if (alarm_enc1_pending || alarm_enc2_pending) {
     SoftStopAlarm e1, e2; bool q1, q2;
     noInterrupts();
     q1 = alarm_enc1_pending; q2 = alarm_enc2_pending;
@@ -855,7 +811,6 @@ void loop() {
       Serial.print(F(", target=")); Serial.print(e1.target,1);
       Serial.print(F(", meas="));   Serial.print(e1.meas,1);
       Serial.print(F(", u="));      Serial.println(e1.u,0);
-      softstop1 = true;
     }
     if (q2) {
       Serial.print(F("ALARM,code=ENC_FREEZE, motor=2, t="));
@@ -863,9 +818,7 @@ void loop() {
       Serial.print(F(", target=")); Serial.print(e2.target,1);
       Serial.print(F(", meas="));   Serial.print(e2.meas,1);
       Serial.print(F(", u="));      Serial.println(e2.u,0);
-      softstop2 = true;
     }
     comm_quiet = true;
-  
   }
 }
